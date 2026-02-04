@@ -9,6 +9,46 @@ import gradio as gr
 
 load_dotenv(override=True)
 
+OUT_OF_TOKENS_MESSAGE = (
+    "We are currently unable to process your request because your token "
+    "allocation appears to be exhausted across all supported providers "
+    "(OpenAI, Groq, Gemini, and DeepSeek). Please review your usage "
+    "limits or update your billing details before trying again."
+)
+
+
+def get_external_llm_key():
+    """
+    Return the first available external LLM API key in priority order:
+    1. OpenAI
+    2. Groq
+    3. Gemini
+    4. DeepSeek
+
+    It looks only at environment variables and does not make any network calls.
+
+    Returns:
+        (provider_name, api_key) tuple, where provider_name is one of
+        'openai', 'groq', 'gemini', or 'deepseek'.
+
+    Raises:
+        RuntimeError: if none of the supported API keys are set.
+    """
+    provider_env_map = [
+        ("openai", "OPENAI_API_KEY"),
+        ("groq", "GROQ_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+        ("deepseek", "DEEPSEEK_API_KEY"),
+    ]
+
+    for provider, env_var in provider_env_map:
+        api_key = os.getenv(env_var)
+        if api_key:
+            return provider, api_key
+
+    raise RuntimeError(OUT_OF_TOKENS_MESSAGE)
+
+
 def push(text):
     requests.post(
         "https://api.pushover.net/1/messages.json",
@@ -76,15 +116,14 @@ tools = [{"type": "function", "function": record_user_details_json},
 class Me:
 
     def __init__(self):
-        self.openai = OpenAI()
-        self.name = "Ed Donner"
-        reader = PdfReader("me/linkedin.pdf")
+        self.name = "Almog Ben Simon"
+        reader = PdfReader("/Users/almogbensimon/Projects/agents/1_foundations/me/Almog Ben-Simon CV.pdf")
         self.linkedin = ""
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 self.linkedin += text
-        with open("me/summary.txt", "r", encoding="utf-8") as f:
+        with open("/Users/almogbensimon/Projects/agents/1_foundations/me/summary.txt", "r", encoding="utf-8") as f:
             self.summary = f.read()
 
 
@@ -116,7 +155,42 @@ If the user is engaging in discussion, try to steer them towards getting in touc
         messages = [{"role": "system", "content": self.system_prompt()}] + history + [{"role": "user", "content": message}]
         done = False
         while not done:
-            response = self.openai.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=tools)
+            response = None
+            last_error = None
+
+            # Try each provider in priority order for this call.
+            for provider, env_var, base_url, model in [
+                ("openai", "OPENAI_API_KEY", None, "gpt-4o-mini"),
+                ("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1", "llama-3.1-8b-instant"),
+                ("gemini", "GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-1.5-flash"),
+                ("deepseek", "DEEPSEEK_API_KEY", "https://api.deepseek.com/v1", "deepseek-chat"),
+            ]:
+                api_key = os.getenv(env_var)
+                if not api_key:
+                    continue
+
+                client_kwargs = {"api_key": api_key}
+                if base_url is not None:
+                    client_kwargs["base_url"] = base_url
+
+                client = OpenAI(**client_kwargs)
+
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            if response is None:
+                # No provider succeeded for this call.
+                # Optionally log last_error somewhere if needed.
+                return OUT_OF_TOKENS_MESSAGE
+
             if response.choices[0].finish_reason=="tool_calls":
                 message = response.choices[0].message
                 tool_calls = message.tool_calls
